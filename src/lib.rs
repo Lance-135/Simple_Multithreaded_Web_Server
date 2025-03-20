@@ -7,7 +7,7 @@ use std::{
 type Job = Box<dyn FnOnce() + Send + 'static>;
 pub struct ThreadPool{
     workers: Vec<Worker>,
-    senders: mpsc::Sender<Job>
+    senders: Option<mpsc::Sender<Job>>
 }
 
 impl ThreadPool{
@@ -26,7 +26,7 @@ impl ThreadPool{
         for id in 0..size{
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
-        ThreadPool { workers, senders }
+        ThreadPool { workers, senders:Some(senders) }
     }
 
     pub fn execute<F>(&self, f: F)
@@ -34,7 +34,7 @@ impl ThreadPool{
         F: FnOnce() + Send + 'static
         {
             let job = Box::new(f);
-            self.senders.send(job).unwrap();
+            self.senders.as_ref().unwrap().send(job).unwrap();
         }
 }
 
@@ -47,10 +47,30 @@ impl Worker {
     
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>)-> Worker{
         let thread = thread::spawn(move || loop{
-            let job = receiver.lock().unwrap().recv().unwrap();
-            println!("worker {id} got a job; executing;");
-            job();
+            let message = receiver.lock().unwrap().recv();
+            match message{
+                Ok(job) =>{
+                    println!("worker {id} got a job; executing;");
+                    job();
+                },
+                Err(_) =>{
+                    println!("worker {id} disconnected, shutting down;");
+                    break;
+                }
+            }
+            
         });
         Worker{id, thread}
+    }
+}
+
+// implmenting drop trait for the ThreadPool
+impl Drop for ThreadPool{
+    fn drop(&mut self) {
+        drop(self.senders.take());
+        for worker in self.workers.drain(..){
+            println!("Shutting down the worker {}", worker.id);
+            worker.thread.join().unwrap();
+        }
     }
 }
